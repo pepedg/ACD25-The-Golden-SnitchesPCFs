@@ -1,0 +1,79 @@
+trigger:
+- main
+
+pool:
+  vmImage: windows-latest
+
+name: $(Year:yyyy).$(Date:MM).$(Date:dd).$(Rev:r)
+
+variables:
+# Used for generation PCF control version
+  majorVersion: 1
+  minorVersion: 1
+stages:
+- stage: BuildSolution
+  jobs:
+  - job: BuildSolution
+    steps:
+    - checkout: self
+      persistCredentials: true
+      fetchDepth: 0
+
+    - powershell: |
+        Set-Variable -name "version" -value $(Build.BuildNumber)
+        $majorVersion = $(majorVersion)
+        $minorVersion = $(minorVersion)
+        $versionSplit = $version.Split('.')
+        $pcfVersion = [string]::Join('',$majorVersion,'.',$versionSplit[0],$versionSplit[1],$versionSplit[2],'.',$versionSplit[3])
+        Write-Host $pcfVersion
+        Write-Host "##vso[task.setvariable variable=pcfVersion;]$pcfVersion"        
+      displayName: Update solution and controls versions.
+
+    - task: PowerShell@2
+      inputs:
+        filePath: '$(Build.SourcesDirectory)\ALM\updateVersion.ps1'
+        arguments: '-folder:''$(Build.SourcesDirectory)'' -solutionVersionNumber:''$(Build.BuildNumber)'' -controlVersionNumber:''$(pcfVersion)'''
+        
+    - task: VSBuild@1
+      inputs:
+        solution: '**\*.cdsproj'
+        msbuildArgs: '/t:build /restore /p:pcfbuildmode=production'
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.SourcesDirectory)\PCFMapSolution\bin\Debug\PCFMapSolution.zip'
+        ArtifactName: 'drop'
+        publishLocation: 'Container'
+
+- stage: PublishToPROD
+  dependsOn: [BuildSolution]
+  variables:
+    EnvironmentName: 'ACDC-PROD'
+  jobs:
+    - deployment: PUSH_SOLUTION_PCF_TO_PROD
+      environment: '${{variables.EnvironmentName}}'    
+      strategy:
+        runOnce:
+          deploy:
+            steps:            
+              - task: DownloadBuildArtifacts@1
+                inputs:
+                  buildType: 'current'
+                  downloadType: 'single'
+                  artifactName: 'drop'
+                  downloadPath: '$(System.ArtifactsDirectory)'
+                  cleanDestinationFolder: true
+              - task: PowerPlatformToolInstaller@2
+                inputs:
+                  DefaultVersion: true
+              - task: PowerPlatformImportSolution@2
+                displayName: 'Import PCF Solution to PROD'
+                inputs:
+                  authenticationType: 'PowerPlatformSPN'
+                  PowerPlatformSPN: 'ACDC-PROD'
+                  Environment: 'https://acdcprod.crm4.dynamics.com/'
+                  SolutionInputFile: '$(System.ArtifactsDirectory)\drop\PCFMapSolution.zip'
+                  AsyncOperation: true
+                  MaxAsyncWaitTime: '60'
+                  StageAndUpgrade: true
+                  ActivatePlugins: false
